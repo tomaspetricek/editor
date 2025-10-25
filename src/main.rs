@@ -1,60 +1,154 @@
-use std::error::Error;
-use std::fs::{File, OpenOptions, read};
-use std::io::{Read, Seek, SeekFrom, Write, stdin};
-use std::process;
+use crossterm::{
+    cursor,
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    execute,
+    terminal::{ClearType, disable_raw_mode, enable_raw_mode},
+};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write, stdin, stdout};
+use std::path::PathBuf;
 
-fn run() -> Result<(), Box<dyn Error>> {
-    println!("enter path to file to be loaded:");
+struct Editor {
+    file: File,
+    contents: String,
+    keep_editing: bool,
+    save_changes: bool,
+}
 
-    let mut file_path = String::new();
-    let _ = match stdin().read_line(&mut file_path) {
-        Ok(read_count) => read_count,
-        Err(err) => {
-            println!("failed to read file path due to: {err}");
-            return Err(Box::new(err));
+impl Editor {
+    fn get_file_path() -> io::Result<PathBuf> {
+        println!("enter path to file to be loaded:");
+        let mut file_path = String::new();
+        stdin().read_line(&mut file_path)?;
+        Ok(PathBuf::from(file_path.trim()))
+    }
+
+    fn open_file(path: &PathBuf) -> io::Result<File> {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(false)
+            .open(path)
+    }
+
+    fn read_contents(file: &mut File) -> io::Result<String> {
+        file.seek(SeekFrom::Start(0))?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)?;
+        Ok(contents)
+    }
+
+    fn open() -> io::Result<Editor> {
+        let file_path = Self::get_file_path().map_err(|err| {
+            eprintln!("failed to get current file path due to: {err}");
+            err
+        })?;
+        let mut file = Self::open_file(&file_path).map_err(|err| {
+            eprintln!("failed to open file: {file_path:#?} due to: {err}");
+            err
+        })?;
+        let contents = Self::read_contents(&mut file).map_err(|err| {
+            eprintln!("failed to read file contents due to: {err}");
+            err
+        })?;
+        Ok(Editor {
+            file: file,
+            contents: contents,
+            keep_editing: true,
+            save_changes: true,
+        })
+    }
+
+    fn save_changes(&mut self) -> io::Result<()> {
+        self.file.set_len(0)?;
+        self.file.seek(SeekFrom::Start(0))?;
+        self.file.write_all(self.contents.as_bytes())?;
+        self.file.flush()?;
+        Ok(())
+    }
+
+    fn display_content(&self) {
+        println!("{}", self.contents);
+    }
+
+    fn display_menu() {
+        println!("Press Ctrl+S to save, Ctrl+C to quit.");
+    }
+
+    fn read_key() -> io::Result<KeyEvent> {
+        loop {
+            if event::poll(std::time::Duration::from_millis(500))? {
+                if let Event::Key(key_event) = event::read()? {
+                    return Ok(key_event);
+                }
+            }
         }
-    };
-    let file_path = file_path.trim();
+    }
 
-    let mut file = match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(false)
-        .open(&file_path)
-    {
-        Ok(file) => file,
-        Err(err) => {
-            eprintln!("failed to open file due to: {err}");
-            return Err(Box::new(err));
+    fn process_key(&mut self, key_event: KeyEvent) -> Result<(), Box<dyn std::error::Error>> {
+        if key_event.modifiers.contains(KeyModifiers::CONTROL) {
+            if key_event.code == KeyCode::Char('s') {
+                println!("Ctrl+S pressed!");
+                self.keep_editing = false;
+            } else if key_event.code == KeyCode::Char('c') {
+                println!("Ctrl+C pressed!");
+                self.keep_editing = false;
+                self.save_changes = false;
+            }
+        } else {
+            match key_event.code {
+                KeyCode::Up => {
+                    execute!(stdout(), cursor::MoveUp(1),)?;
+                }
+                KeyCode::Down => {
+                    execute!(stdout(), cursor::MoveDown(1),)?;
+                }
+                KeyCode::Left => {
+                    execute!(stdout(), cursor::MoveLeft(1),)?;
+                }
+                KeyCode::Right => {
+                    execute!(stdout(), cursor::MoveRight(1),)?;
+                }
+                KeyCode::Char(value) => {
+                    print!("{value}");
+                }
+                _ => {}
+            }
         }
-    };
+        Ok(())
+    }
 
-    let mut contents = String::new();
-    let _ = match file.read_to_string(&mut contents) {
-        Ok(read_count) => read_count,
-        Err(err) => {
-            eprintln!("failed to read content of the file into memory due to: {err}");
-            return Err(Box::new(err));
+    pub fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        enable_raw_mode()?;
+
+        execute!(
+            stdout(),
+            crossterm::terminal::Clear(ClearType::All),
+            crossterm::cursor::MoveTo(0, 0)
+        )?;
+        self.display_content();
+        Self::display_menu();
+
+        while self.keep_editing {
+            let key_event = Self::read_key()?;
+            self.process_key(key_event)?;
         }
-    };
-    println!("current content of: {file_path} is:\n{contents}");
-
-    file.set_len(0)?;
-    file.seek(SeekFrom::Start(0))?;
-
-    let _ = match file.write_all(contents.as_bytes()) {
-        Ok(res) => res,
-        Err(err) => {
-            eprintln!("failed to write contents into the file due to: {err}");
-            return Err(Box::new(err));
+        if self.save_changes {
+            self.save_changes()?;
         }
-    };
-    Ok(())
+        disable_raw_mode()?;
+        Ok(())
+    }
 }
 
 fn main() {
-    if let Err(err) = run() {
-        eprintln!("failed to run due to: {err}");
+    let mut editor = Editor::open().unwrap_or_else(|err| {
+        eprintln!("failed to open editor: {err}");
+        std::process::exit(1);
+    });
+
+    if let Err(err) = editor.run() {
+        eprintln!("editor failed: {err}");
         std::process::exit(1);
     }
 }
