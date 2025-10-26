@@ -2,11 +2,12 @@ use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
-    terminal::{ClearType, disable_raw_mode, enable_raw_mode},
+    terminal::{ClearType, disable_raw_mode, enable_raw_mode, ScrollUp, SetSize, size},
 };
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write, stdin, stdout};
 use std::path::PathBuf;
+use std::env;
 
 struct Editor {
     file: File,
@@ -38,11 +39,7 @@ impl Editor {
         Ok(contents)
     }
 
-    fn open() -> io::Result<Editor> {
-        let file_path = Self::get_file_path().map_err(|err| {
-            eprintln!("failed to get current file path due to: {err}");
-            err
-        })?;
+    fn open(file_path: &PathBuf) -> io::Result<Editor> {
         let mut file = Self::open_file(&file_path).map_err(|err| {
             eprintln!("failed to open file: {file_path:#?} due to: {err}");
             err
@@ -67,12 +64,12 @@ impl Editor {
         Ok(())
     }
 
-    fn display_content(&self) {
-        println!("{}", self.contents);
+    fn display_content(&self) -> io::Result<()> {
+        write!(stdout(), "{}", self.contents)
     }
 
-    fn display_menu() {
-        println!("Press Ctrl+S to save, Ctrl+C to quit.");
+    fn display_menu() -> io::Result<()> {
+        write!(stdout(), "Press Ctrl+S to save, Ctrl+C to quit.")
     }
 
     fn read_key() -> io::Result<KeyEvent> {
@@ -126,8 +123,8 @@ impl Editor {
             crossterm::terminal::Clear(ClearType::All),
             crossterm::cursor::MoveTo(0, 0)
         )?;
-        self.display_content();
-        Self::display_menu();
+        self.display_content()?;
+        Self::display_menu()?;
 
         while self.keep_editing {
             let key_event = Self::read_key()?;
@@ -142,7 +139,16 @@ impl Editor {
 }
 
 fn main() {
-    let mut editor = Editor::open().unwrap_or_else(|err| {
+    let mut args = std::env::args();
+    args.next();
+    let file_path = match args.next() {
+        Some(file_path) => PathBuf::from(file_path),
+        None => {
+            eprintln!("path to file not provided");
+            std::process::exit(1);
+        }
+    };
+    let mut editor = Editor::open(&file_path).unwrap_or_else(|err| {
         eprintln!("failed to open editor: {err}");
         std::process::exit(1);
     });
